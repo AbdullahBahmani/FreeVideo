@@ -29,6 +29,13 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
+MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ || "$MACOS_MAJOR" -lt 14 ]]; then
+  echo "FreeVideo's pinned PyTorch 2.13 wheel requires macOS 14 or newer." >&2
+  echo "Current macOS: $(sw_vers -productVersion)" >&2
+  exit 1
+fi
+
 if ! command -v git >/dev/null 2>&1; then
   echo "Git is required. Run: xcode-select --install" >&2
   exit 1
