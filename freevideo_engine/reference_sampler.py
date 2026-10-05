@@ -8,6 +8,7 @@ The released VDN checkpoint is not a trained Ref2VA checkpoint.
 import time
 
 import torch
+from .device import synchronize
 
 from diffusers import MiniMaxH3Scheduler
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
@@ -101,7 +102,7 @@ def generate_latents(transformer, prompt_embeds, text_token_tags, num_frames, nu
 
     if runtime is not None:
         runtime.barrier()
-        torch.cuda.synchronize(device)
+        synchronize(device)
 
     seq_len = position_ids.shape[0]
     for t, audio_t in zip(scheduler.timesteps, audio_scheduler.timesteps):
@@ -134,11 +135,11 @@ def generate_latents(transformer, prompt_embeds, text_token_tags, num_frames, nu
             audio_rows[num_audio_condition_rows:], return_dict=False)[0]
 
         if step_seconds is not None:
-            torch.cuda.synchronize(device)
+            synchronize(device)
             step_seconds.append(time.perf_counter() - step_started)
 
     if runtime is not None:
-        torch.cuda.synchronize(device)
+        synchronize(device)
         runtime.barrier()
 
     # Unpatchify (the AfterDenoise step's reshape) and unpack the channel-major audio rows.
