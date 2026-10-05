@@ -61,6 +61,12 @@ def available_backends(hardware, *, discovered=None, probe_missing=True):
     unavailable requested backend into another backend or a math SDPA kernel.
     """
     discovered = set(installed_backends() if discovered is None else discovered)
+    if hardware.architecture == 'apple-silicon':
+        # The MPS route is PyTorch's portable SDPA plus ordinary matmul. CUDA
+        # kernel probes (including the synthetic FP8 linear probe) do not apply.
+        if 'torch-sdpa' not in discovered:
+            raise RuntimeError('PyTorch MPS SDPA backend is unavailable')
+        return {'torch-sdpa'}
     expected = identity(hardware)
     # Normalize tuples exactly as on disk.
     expected = json.loads(json.dumps(expected))
