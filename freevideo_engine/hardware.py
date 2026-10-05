@@ -26,6 +26,8 @@ class Hardware:
 
     @property
     def architecture(self):
+        if self.system == 'Darwin':
+            return 'apple-silicon'
         if self.capability in ((8, 0), (8, 6)):
             return 'ampere'
         if self.capability == (8, 9):
@@ -157,12 +159,32 @@ def _detect_local():
     from .system import system_memory, nvidia_smi
     import subprocess
     import torch
-    if not torch.cuda.is_available():
-        raise RuntimeError('A CUDA GPU is required for VDN generation; plan --hardware-json can inspect presets offline.')
-    index = torch.cuda.current_device()
-    free, total = torch.cuda.mem_get_info(index)
+
     ram = system_memory()
     cap, available = cgroup_capacity(include_reclaimable=True)
+    ram_available = min(ram['available_bytes'], available) if available is not None else ram['available_bytes']
+
+    if (platform.system() == 'Darwin' and platform.machine().lower() in ('arm64', 'aarch64')
+            and getattr(torch.backends, 'mps', None) is not None
+            and torch.backends.mps.is_available()):
+        recommended = getattr(torch.mps, 'recommended_max_memory', None)
+        total = int(recommended()) if recommended is not None else int(ram['total_bytes'] * .7)
+        used = int(torch.mps.driver_allocated_memory())
+        free = min(max(0, total - used), ram_available)
+        try:
+            name = subprocess.check_output(
+                ['sysctl', '-n', 'machdep.cpu.brand_string'], text=True,
+                stderr=subprocess.DEVNULL, timeout=5).strip()
+        except (OSError, subprocess.SubprocessError):
+            name = platform.processor() or 'Apple Silicon'
+        return Hardware(name, (0, 0), total, free, ram['total_bytes'], ram_available,
+                        'Darwin', str(torch.__version__), '', None, 'MPS', platform.mac_ver()[0])
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            'A supported accelerator is required for VDN generation: NVIDIA CUDA or Apple Silicon MPS.')
+    index = torch.cuda.current_device()
+    free, total = torch.cuda.mem_get_info(index)
     uuid = str(getattr(torch.cuda.get_device_properties(index), 'uuid', ''))
     if uuid and not uuid.startswith(('GPU-', 'MIG-')):
         uuid = 'GPU-' + uuid
@@ -175,12 +197,21 @@ def _detect_local():
     except (OSError, RuntimeError, subprocess.SubprocessError, IndexError):
         pass
     return Hardware(torch.cuda.get_device_name(index), torch.cuda.get_device_capability(index),
-                    total, free, ram['total_bytes'], min(ram['available_bytes'], available) if available is not None else ram['available_bytes'],
+                    total, free, ram['total_bytes'], ram_available,
                     platform.system(), str(torch.__version__), str(torch.version.cuda), cap, uuid, driver)
 
 
 def installed_backends():
     import importlib.metadata
+    import torch
+
+    if (platform.system() == 'Darwin'
+            and getattr(torch.backends, 'mps', None) is not None
+            and torch.backends.mps.is_available()):
+        # MPS uses PyTorch's generic scaled-dot-product attention. CUDA-only
+        # Sage/Flash/cuDNN backends are intentionally not advertised.
+        return {'torch-sdpa'}
+
     result = {'cudnn', 'torch-flash'}
     for name, module, distribution in [('sage2', 'sageattention', 'sageattention'), ('fa2', 'flash_attn_2_cuda', 'flash-attn')]:
         try:
