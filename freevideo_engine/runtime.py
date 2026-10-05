@@ -290,7 +290,7 @@ class Engine:
         self.schedule_hook = None
         embeddings = None
         if adaln_cache:
-            self.cursor = ScheduleCursor(schedule_timesteps(steps, task=task))
+            self.cursor = ScheduleCursor(schedule_timesteps(steps, device=self.device, task=task))
         table_cache = (TableCache(self.cache, manifest['source_id'], steps, task=task, manifest=manifest,
                                  timesteps=self.cursor.timesteps, channels=model.config.hidden_size, device='cpu')
                        if adaln_cache and (adaln_disk_cache or portable_adaln) else None)
@@ -315,7 +315,7 @@ class Engine:
                          _load_safetensors(self.cache / f'adaln/{index:02d}.safetensors').items()}
             if adaln_cache and not cache_hit:
                 if embeddings is None:
-                    _, embeddings = schedule_embeddings(model, steps, task=task)
+                    _, embeddings = schedule_embeddings(model, steps, device=self.device, task=task)
                 block.load_state_dict({name: value.to(self.device) for name, value in adaln.items()}, strict=False, assign=True)
                 table = [block.adaln_proj(embedding) for embedding in embeddings]
                 block.adaln_proj = CachedModulation(table, self.cursor)
