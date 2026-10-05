@@ -1,5 +1,6 @@
 """Observed process memory and dedicated cgroup limits; no GPU dependencies."""
 from pathlib import Path
+import platform
 from .system import windows
 
 
@@ -28,6 +29,7 @@ class ProcessMemory:
 
     def __init__(self):
         self.windows = None
+        self.macos = platform.system() == 'Darwin'
         if windows():
             from .win32 import ProcessMemory as WindowsMemory
             self.windows = WindowsMemory()
@@ -50,6 +52,8 @@ class ProcessMemory:
     def sample(self, root_pid):
         if self.windows is not None:
             return self.windows.sample(root_pid)
+        if self.macos:
+            return self._sample_macos(root_pid)
         parents = {}
         for path in Path('/proc').iterdir():
             if path.name.isdigit():
@@ -154,9 +158,79 @@ class ProcessMemory:
                 'system_file_cache_bytes': system.get('Cached'), 'system_dirty_bytes': system.get('Dirty'),
                 'system_writeback_bytes': system.get('Writeback'), 'cgroup_memory': self.last_cgroup}
 
+    def _sample_macos(self, root_pid):
+        """Best-effort process-tree RSS on macOS, where /proc/PSS is unavailable."""
+        import psutil
+        from .system import system_memory
+        try:
+            root = psutil.Process(root_pid)
+            processes = [root, *root.children(recursive=True)]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            processes = []
+        rss = read_bytes = write_bytes = count = 0
+        incomplete = []
+        for process in processes:
+            try:
+                rss += int(process.memory_info().rss)
+                count += 1
+                try:
+                    io = process.io_counters()
+                    read_bytes += int(getattr(io, 'read_bytes', 0))
+                    write_bytes += int(getattr(io, 'write_bytes', 0))
+                except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError):
+                    pass
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                incomplete.append(process.pid)
+        memory = system_memory()
+        available = int(memory['available_bytes'])
+        self.peak_rss = max(self.peak_rss, rss)
+        if not incomplete:
+            # macOS exposes no PSS equivalent via psutil. RSS is conservative
+            # for this one-worker process tree and is used as the guard metric.
+            self.peak_pss = max(self.peak_pss, rss)
+            self.peak_inference_pss = max(self.peak_inference_pss, rss)
+        self.pss_complete &= not incomplete
+        self.minimum_available = min(self.minimum_available or available, available)
+        self.minimum_effective_available = min(
+            self.minimum_effective_available if self.minimum_effective_available is not None else available,
+            available)
+        self.minimum_inference_available = min(
+            self.minimum_inference_available if self.minimum_inference_available is not None else available,
+            available)
+        self.peak_tree_read = max(self.peak_tree_read, read_bytes)
+        self.peak_tree_write = max(self.peak_tree_write, write_bytes)
+        self.last_cgroup = {'limit_bytes': None, 'available_bytes': None,
+                            'reclaimable_available_bytes': None, 'groups': [], 'complete': True}
+        self.samples += 1
+        return {'rss_bytes': rss, 'pss_bytes': None, 'nonfile_pss_bytes': None,
+                'inference_guard_bytes': rss if not incomplete else None,
+                'inference_file_protection_bytes': None,
+                'guard_bytes': rss if not incomplete else None, 'guard_metric': 'RSS',
+                'processes': count, 'unreadable_pss_pids': incomplete,
+                'system_available_bytes': available, 'effective_available_bytes': available,
+                'inference_available_bytes': available,
+                'system_file_cache_bytes': None, 'system_dirty_bytes': None,
+                'system_writeback_bytes': None, 'cgroup_memory': self.last_cgroup}
+
     def result(self):
         if self.windows is not None:
             return self.windows.result()
+        if self.macos:
+            return {'process_tree_peak_rss_bytes': self.peak_rss,
+                    'inference_peak_working_pss_bytes': self.peak_inference_pss,
+                    'process_tree_peak_guard_bytes': self.peak_pss,
+                    'process_tree_guard_complete': self.pss_complete, 'ram_guard_metric': 'RSS',
+                    'process_tree_peak_pss_bytes': None, 'process_tree_pss_complete': False,
+                    'system_min_available_bytes': self.minimum_available,
+                    'effective_min_available_bytes': self.minimum_effective_available,
+                    'inference_min_available_bytes': self.minimum_inference_available,
+                    'cgroup_memory_final': self.last_cgroup,
+                    'ram_observation_samples': self.samples,
+                    'process_tree_disk_read_bytes': self.peak_tree_read,
+                    'process_tree_disk_write_bytes': self.peak_tree_write,
+                    'process_tree_io_version': 2,
+                    'process_tree_io_scope': 'Best-effort psutil process-tree counters on macOS.',
+                    'ram_observation_scope': 'macOS process-tree RSS; PSS is unavailable and unified-memory device allocations share physical RAM.'}
         return {'process_tree_peak_rss_bytes': self.peak_rss,
                 'inference_peak_working_pss_bytes': self.peak_inference_pss,
                 'process_tree_peak_guard_bytes': self.peak_pss,
