@@ -32,6 +32,10 @@ def compile_blocks(decoder):
     """
     if os.environ.get('FREEVIDEO_VAE_COMPILE', '1').lower() in ('0', 'off', 'false'):
         return False
+    if getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available():
+        # Keep the first MPS preview on the eager decoder. Inductor's MPS
+        # coverage is still narrower than eager Metal ops and this is optional.
+        return False
     for block in decoder.transformer_blocks:
         if not getattr(block, 'freevideo_compiled', False):
             block.forward = torch.compile(block.forward, dynamic=False)
