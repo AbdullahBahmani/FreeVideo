@@ -38,13 +38,14 @@ def snapshot(torch, clip=None, manager=None, *, windows_memory=False):
         for row in details:
             row['frames'] = []  # The named counter identifies this optional query.
         result.setdefault('collection_errors', {}).setdefault(section, details)
+    if accelerator_kind() == 'cuda':
+        try:
+            free, total = torch.cuda.mem_get_info()
+            result.update(free_bytes=int(free), total_bytes=int(total))
+        except Exception as error:
+            failed('cuda_memory', error)
     try:
-        free, total = torch.cuda.mem_get_info()
-        result.update(free_bytes=int(free), total_bytes=int(total))
-    except Exception as error:
-        failed('cuda_memory', error)
-    try:
-        stats = torch.cuda.memory_stats()
+        stats = torch.cuda.memory_stats() if accelerator_kind() == 'cuda' else {}
         for target, source in (
                 ('allocated_bytes', 'allocated_bytes.all.current'), ('reserved_bytes', 'reserved_bytes.all.current'),
                 ('peak_allocated_bytes', 'allocated_bytes.all.peak'), ('peak_reserved_bytes', 'reserved_bytes.all.peak'),
@@ -55,12 +56,13 @@ def snapshot(torch, clip=None, manager=None, *, windows_memory=False):
                 result[target] = stats[source]
     except Exception as error:
         failed('allocator_stats', error)
+    if accelerator_kind() == 'cuda':
+        try:
+            result['memory_fraction'] = float(torch.cuda.get_per_process_memory_fraction())
+        except Exception as error:
+            failed('memory_fraction', error)
     try:
-        result['memory_fraction'] = float(torch.cuda.get_per_process_memory_fraction())
-    except Exception as error:
-        failed('memory_fraction', error)
-    try:
-        stats = torch.cuda.memory.host_memory_stats()
+        stats = torch.cuda.memory.host_memory_stats() if accelerator_kind() == 'cuda' else {}
         for target, source in (('host_pinned_allocated_bytes', 'allocated_bytes.current'),
                                ('host_pinned_active_bytes', 'active_bytes.current'),
                                ('host_pinned_peak_bytes', 'allocated_bytes.peak')):
