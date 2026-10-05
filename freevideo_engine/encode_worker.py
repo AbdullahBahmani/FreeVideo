@@ -108,11 +108,12 @@ def main():
                     from .encoder_memory import failure_resources
                     record['failure'].update(failure_resources(sys.modules['torch'],
                         query_cuda=record['failure']['kind'] != 'cuda_error'))
-                record['gpu'] = record['failure']['gpu']
-                for target, source in (('torch_peak_allocated_bytes', 'peak_allocated_bytes'),
-                                       ('torch_peak_reserved_bytes', 'peak_reserved_bytes')):
-                    if source in record['gpu']:
-                        record[target] = record['gpu'][source]
+                if isinstance(record['failure'].get('gpu'), dict):
+                    record['gpu'] = record['failure']['gpu']
+                    for target, source in (('torch_peak_allocated_bytes', 'peak_allocated_bytes'),
+                                           ('torch_peak_reserved_bytes', 'peak_reserved_bytes')):
+                        if source in record['gpu']:
+                            record[target] = record['gpu'][source]
             save(request['metrics'], record)
         raise
 
