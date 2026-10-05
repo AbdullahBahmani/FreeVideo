@@ -429,11 +429,101 @@ def decoder_workspace(canvas=None):
     return int(3.25 * GiB * max(1., area))
 
 
+def _choose_apple(hardware: Hardware, *, vram_gib=None, ram_gib=None, attention='auto',
+                  gpu_reserve_gib=None, ram_reserve_gib=None, available_backends=None,
+                  canvas=None, stage='generation', lora_max_block_bytes=0, lora_root_bytes=0,
+                  **_ignored):
+    """Conservative correctness-first policy for the experimental MPS backend.
+
+    Compact FP8 tensors stay in CPU/unified memory. WeightOnlyLinear expands one
+    projection at a time to BF16/FP16 on MPS, so no CUDA/Triton kernels or
+    persistent BF16 copy of the transformer are required.
+    """
+    if hardware.system != 'Darwin' or hardware.architecture != 'apple-silicon':
+        raise ValueError('Apple policy requires Apple Silicon MPS hardware')
+    if stage not in ('encoding', 'generation'):
+        raise ValueError('Resource planning stage must be encoding or generation')
+    if lora_max_block_bytes or lora_root_bytes:
+        raise ValueError('Online LoRA is not enabled in the first MPS preview')
+    if vram_gib is not None or ram_gib is not None:
+        # Explicit caps remain useful for testing, but they cannot create
+        # separate VRAM on a unified-memory machine.
+        if vram_gib is not None and (not math.isfinite(vram_gib) or vram_gib <= 0):
+            raise ValueError('MPS memory cap must be positive')
+        if ram_gib is not None and (not math.isfinite(ram_gib) or ram_gib <= 0):
+            raise ValueError('RAM cap must be positive')
+    available = set(available_backends if available_backends is not None else {'torch-sdpa'})
+    selected = 'torch-sdpa' if attention in ('auto', 'sdpa') else attention
+    legs = selected.split('/')
+    if len(legs) == 1:
+        legs *= 2
+    if len(legs) != 2 or any(leg != 'torch-sdpa' or leg not in available for leg in legs):
+        raise ValueError('Apple Silicon preview supports only torch-sdpa attention')
+
+    total = hardware.ram_total
+    live = hardware.ram_available
+    if ram_gib is not None:
+        total = min(total, int(ram_gib * GiB))
+        live = min(live, total)
+    # The compact transformer is roughly 45 GB before activations/decoder.
+    # Do not pretend a small-memory Mac has a CUDA-style disk-streaming path:
+    # the first preview keeps compact tensors resident in unified CPU memory.
+    if stage == 'generation' and total < 48 * GiB:
+        raise ValueError('The experimental MPS backend currently requires at least 48 GiB unified memory; '
+                         '64 GiB or more is recommended.')
+
+    reserve_ram = (ram_reserve_gib if ram_reserve_gib is not None
+                   else max(4., min(8., live / GiB * .10)))
+    if not math.isfinite(reserve_ram) or reserve_ram < 0:
+        raise ValueError('System memory reserve must be finite and nonnegative')
+    unified_budget = max(0, live - int(reserve_ram * GiB))
+
+    device_total = hardware.vram_total
+    device_live = min(hardware.vram_free, unified_budget)
+    if vram_gib is not None:
+        device_total = min(device_total, int(vram_gib * GiB))
+        device_live = min(device_live, device_total)
+    reserve_gpu = gpu_reserve_gib if gpu_reserve_gib is not None else 1.
+    device_budget = max(0, device_live - int(reserve_gpu * GiB))
+
+    engine = dict(attention='torch-sdpa/torch-sdpa', prefetch=False,
+                  adaln_cache=True, adaln_disk_cache=True, inference_kernels=False,
+                  query_chunk=0, ff_chunk=0, head_chunk=0, projection_chunk=0,
+                  offload_refiner=False, attention_cpu_outputs=False,
+                  grouped_attention_outputs=False, fp8_ff_recompute=False,
+                  resident_blocks=50, pin_host_gb=0., cache_refined_text=False,
+                  window_batch=1, linear_compute='portable-bf16', fp8_gemm='auto',
+                  window_varlen=False, varlen_smooth_k=True, stream_weights=False,
+                  head_parallelism=1, residual_offload=False)
+    decoder = dict(offload=False, prefetch=False, tile_group=False, preload=False,
+                   pin_weights=False, stream_output=True, stream_weights=False,
+                   resident_blocks=0, linear_compute_cache=False)
+    notes = [
+        'Experimental Apple Silicon path: PyTorch MPS + generic scaled-dot-product attention.',
+        'Compact FP8 transformer weights remain on CPU/unified memory and are expanded one projection at a time for MPS compute.',
+        'CUDA, Triton, SageAttention, FlashAttention and cuDNN are not used.',
+        'CPU and MPS allocations share one physical memory pool; GPU/RAM budget fields are reporting views, not additive capacities.',
+        'First preview favors correctness over speed and requires the one-shot worker; resident interactive caching is not yet qualified.',
+    ]
+    if total < 64 * GiB:
+        notes.append('Less than 64 GiB unified memory is an unverified capacity tier and may OOM on larger requests.')
+    return Policy(3, hardware.to_dict(), device_budget, unified_budget,
+                  int(reserve_gpu * GiB), int(reserve_ram * GiB), 'mps:unified-memory',
+                  engine, decoder, 'Experimental Apple Silicon MPS policy; not performance-qualified.', notes)
+
+
 def choose(hardware: Hardware, *, vram_gib=None, ram_gib=None, attention='auto',
            gpu_reserve_gib=None, ram_reserve_gib=None, available_backends=None, canvas=None,
            demonstrated_ram_bytes=None, allow_capacity_trial=False, stage='generation',
            lora_max_block_bytes=0, lora_root_bytes=0):
     from .geometry import geometry
+    if hardware.architecture == 'apple-silicon':
+        return _choose_apple(hardware, vram_gib=vram_gib, ram_gib=ram_gib, attention=attention,
+                             gpu_reserve_gib=gpu_reserve_gib, ram_reserve_gib=ram_reserve_gib,
+                             available_backends=available_backends, canvas=canvas, stage=stage,
+                             lora_max_block_bytes=lora_max_block_bytes, lora_root_bytes=lora_root_bytes,
+                             demonstrated_ram_bytes=demonstrated_ram_bytes,
+                             allow_capacity_trial=allow_capacity_trial)
     if stage not in ('encoding', 'generation'):
         raise ValueError('Resource planning stage must be encoding or generation')
     if type(lora_max_block_bytes) is not int or lora_max_block_bytes < 0:
