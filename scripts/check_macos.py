@@ -21,15 +21,17 @@ def main():
     import torch.nn.functional as F
 
     dev = torch.device("mps")
-    a = torch.randn((256, 256), device=dev, dtype=torch.float16)
-    b = torch.randn((256, 256), device=dev, dtype=torch.float16)
+    # FreeVideo's transformer runs BF16. Test that exact dtype rather than
+    # passing a weaker FP16-only smoke test.
+    a = torch.randn((256, 256), device=dev, dtype=torch.bfloat16)
+    b = torch.randn((256, 256), device=dev, dtype=torch.bfloat16)
     c = a @ b
     synchronize(dev)
     if not bool(torch.isfinite(c).all()):
         raise SystemExit("MPS matrix multiplication produced non-finite values.")
 
     # Exercise the same generic PyTorch SDPA primitive used by the MPS backend.
-    q = torch.randn((1, 4, 128, 64), device=dev, dtype=torch.float16)
+    q = torch.randn((1, 4, 128, 64), device=dev, dtype=torch.bfloat16)
     out = F.scaled_dot_product_attention(q, q, q, scale=64 ** -0.5)
     synchronize(dev)
     if out.shape != q.shape or not bool(torch.isfinite(out).all()):
