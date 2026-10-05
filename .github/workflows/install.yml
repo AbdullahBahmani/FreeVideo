@@ -40,7 +40,7 @@ jobs:
           python scripts/check_installation.py
           bash -n setup.sh setup_macos.sh test.sh freevideo scripts/bootstrap_linux.sh
           python -m py_compile freevideo_engine/device.py freevideo_engine/mps_compat.py \
-            scripts/check_macos.py scripts/setup_macos_models.py
+            freevideo_engine/mps_sampler.py scripts/check_macos.py scripts/setup_macos_models.py
           ./setup.sh --help
           ./test.sh --help
           ./freevideo --help
