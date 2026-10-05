@@ -523,6 +523,8 @@ class Engine:
                pass_cache_budget_bytes=None, gpu_reserve_bytes=0, pass_resident_blocks=None,
                budget_refresh=None):
         from src.inference.render import load_prompt, generate_latents
+        if self.device.type == 'mps':
+            from .mps_sampler import generate_latents
         from .geometry import geometry, sampler_for_canvas
         refining = initial_latents is not None
         if refining != (refine_steps is not None):
