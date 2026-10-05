@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import subprocess
 import sys
 
 
@@ -55,6 +56,33 @@ def system_memory():
     if windows():
         from .win32 import memory_status
         return memory_status()
+    if platform.system() == 'Darwin':
+        total = int(subprocess.check_output(['sysctl', '-n', 'hw.memsize'], text=True).strip())
+        output = subprocess.check_output(['vm_stat'], text=True)
+        page_size = 4096
+        first = output.splitlines()[0] if output else ''
+        if 'page size of ' in first:
+            try:
+                page_size = int(first.split('page size of ', 1)[1].split(' bytes', 1)[0])
+            except ValueError:
+                pass
+        pages = {}
+        for line in output.splitlines()[1:]:
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            try:
+                pages[key.strip()] = int(value.strip().rstrip('.'))
+            except ValueError:
+                continue
+        # Inactive/speculative/purgeable pages are reclaimable by the VM and
+        # are the closest stdlib-only analogue to Linux MemAvailable.
+        available_pages = sum(pages.get(name, 0) for name in
+            ('Pages free', 'Pages inactive', 'Pages speculative', 'Pages purgeable'))
+        available = min(total, available_pages * page_size)
+        return {'total_bytes': total, 'available_bytes': available,
+                'physical_available_bytes': available, 'commit_available_bytes': None,
+                'swap_total_bytes': None, 'swap_free_bytes': None}
     values = {k: int(v.split()[0]) * 1024 for k, v in
               (line.split(':', 1) for line in Path('/proc/meminfo').read_text(encoding='utf-8').splitlines())
               if v.strip().endswith('kB')}
@@ -154,7 +182,14 @@ def nvidia_smi():
 
 
 def cpu_info():
-    return platform.processor() if windows() else Path('/proc/cpuinfo').read_text(encoding='utf-8').split('\n\n')[0]
+    if windows():
+        return platform.processor()
+    if platform.system() == 'Darwin':
+        try:
+            return subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip()
+        except (OSError, subprocess.SubprocessError):
+            return platform.processor()
+    return Path('/proc/cpuinfo').read_text(encoding='utf-8').split('\n\n')[0]
 
 
 def memory_peak(record):

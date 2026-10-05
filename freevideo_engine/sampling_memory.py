@@ -107,13 +107,20 @@ class SamplingMemory:
                                 and value >= self.previous_process[key]}
         self.previous_process = current
         try:
-            cuda = self.torch.cuda
-            stats = cuda.memory_stats()
-            row.update(allocated_bytes=cuda.memory_allocated(), reserved_bytes=cuda.memory_reserved(),
-                cumulative_peak_allocated_bytes=cuda.max_memory_allocated(),
-                cumulative_peak_reserved_bytes=cuda.max_memory_reserved(),
-                inactive_split_bytes=stats.get('inactive_split_bytes.all.current'),
-                allocation_retries=stats.get('num_alloc_retries'), allocator_ooms=stats.get('num_ooms'))
+            from .device import kind as accelerator_kind, memory_allocated, memory_reserved, max_memory_allocated, max_memory_reserved
+            if accelerator_kind() == 'cuda':
+                cuda = self.torch.cuda
+                stats = cuda.memory_stats()
+                row.update(allocated_bytes=cuda.memory_allocated(), reserved_bytes=cuda.memory_reserved(),
+                    cumulative_peak_allocated_bytes=cuda.max_memory_allocated(),
+                    cumulative_peak_reserved_bytes=cuda.max_memory_reserved(),
+                    inactive_split_bytes=stats.get('inactive_split_bytes.all.current'),
+                    allocation_retries=stats.get('num_alloc_retries'), allocator_ooms=stats.get('num_ooms'))
+            elif accelerator_kind() == 'mps':
+                row.update(allocated_bytes=memory_allocated(), reserved_bytes=memory_reserved(),
+                           cumulative_peak_allocated_bytes=max_memory_allocated(),
+                           cumulative_peak_reserved_bytes=max_memory_reserved(),
+                           allocator_backend='mps')
         except Exception as error:
             row['allocator_error'] = str(error)
         with self.lock:
@@ -142,7 +149,8 @@ class SamplingMemory:
     def host_counters(self):
         result = {}
         try:
-            stats = self.torch.cuda.memory.host_memory_stats()
+            from .device import kind as accelerator_kind
+            stats = self.torch.cuda.memory.host_memory_stats() if accelerator_kind() == 'cuda' else {}
             for target, source in (('pinned_allocated_bytes', 'allocated_bytes.current'),
                                    ('pinned_active_bytes', 'active_bytes.current')):
                 if type(stats.get(source)) is int and stats[source] >= 0:

@@ -148,13 +148,15 @@ class TableCache:
         provenance = self.root / 'producer.json'
         if not provenance.exists():
             from diffusers.models.transformers import transformer_minimax_h3
+            from .device import device_name, kind as accelerator_kind
             save(provenance, {'torch': str(torch.__version__), 'cuda': torch.version.cuda,
-                'gpu': torch.cuda.get_device_name() if str(self.device).startswith('cuda') else 'cpu',
+                'gpu': device_name(), 'accelerator': accelerator_kind(),
                 'implementation': assets.file_hash(__file__),
                 'original_implementation': assets.file_hash(transformer_minimax_h3.__file__),
                 'matmul_precision': torch.get_float32_matmul_precision(),
-                'tf32': torch.backends.cuda.matmul.allow_tf32,
-                'bf16_reduced_reduction': torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction})
+                'tf32': (torch.backends.cuda.matmul.allow_tf32 if accelerator_kind() == 'cuda' else False),
+                'bf16_reduced_reduction': (torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+                                           if accelerator_kind() == 'cuda' else False)})
 
 
 @torch.no_grad()

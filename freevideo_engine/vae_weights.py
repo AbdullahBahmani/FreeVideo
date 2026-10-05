@@ -196,13 +196,16 @@ def _mapped():
     return not windows()
 
 
-def load_video_decoder(base, *, resident_blocks, weight_source=None, linear_fp16=True, device='cuda'):
+def load_video_decoder(base, *, resident_blocks, weight_source=None, linear_fp16=True, device=None):
     """Place the selected decoder prefix directly on CUDA without a CPU copy.
 
     Later blocks stay on the CPU, or bind to `weight_source` without reading.
     Without the Linear cache every parameter keeps from_pretrained's FP32.
     """
     from diffusers import AutoencoderKLMiniMaxH3
+    if device is None:
+        from .device import device as active_device
+        device = active_device()
     directory = Path(base) / 'vae'
     model = skeleton(AutoencoderKLMiniMaxH3, directory)
     if type(resident_blocks) is not int or not 0 <= resident_blocks <= len(model.decoder.transformer_blocks):
@@ -235,13 +238,16 @@ def load_video_decoder(base, *, resident_blocks, weight_source=None, linear_fp16
     return model, metrics
 
 
-def load_video_encoder(base, *, before_upload=None, device='cuda'):
+def load_video_encoder(base, *, before_upload=None, device=None):
     """The conditioning encoder and quant_conv in FP32; decoder tensors are not read.
 
     `before_upload(model)` runs on the meta-parameter model, whose tensor sizes
     are final, before any weight reaches the device.
     """
     from diffusers import AutoencoderKLMiniMaxH3
+    if device is None:
+        from .device import device as active_device
+        device = active_device()
     directory = Path(base) / 'vae'
     model = skeleton(AutoencoderKLMiniMaxH3, directory)
     model.decoder = None
@@ -254,9 +260,12 @@ def load_video_encoder(base, *, before_upload=None, device='cuda'):
     return model, metrics
 
 
-def load_audio_vae(base, *, before_upload=None, device='cuda'):
+def load_audio_vae(base, *, before_upload=None, device=None):
     """The complete audio VAE in FP32, including the buffers stored in its checkpoint."""
     from diffusers import AutoencoderKLMiniMaxH3Audio
+    if device is None:
+        from .device import device as active_device
+        device = active_device()
     directory = Path(base) / 'audio_vae'
     model = skeleton(AutoencoderKLMiniMaxH3Audio, directory)
     if before_upload is not None:

@@ -31,6 +31,11 @@ def add_vdn():
         raise RuntimeError('Patched Diffusers dependency is missing. Run freevideo setup --install-packages.')
     if str(diffusers) not in sys.path:
         sys.path.insert(0, str(diffusers))
+    # Pinned VDN imports its CUDA/Triton FP8 and temporal-conv modules at
+    # module import time. The MPS execution policy never selects those paths.
+    if sys.platform == 'darwin':
+        from .mps_compat import install
+        install()
     from .fa4_guard import activate
     activate()
     return root

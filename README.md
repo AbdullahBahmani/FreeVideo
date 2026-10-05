@@ -53,6 +53,57 @@ git clone https://github.com/FlashML-org/FreeVideo.git
 
 Restart ComfyUI, open **Workflow → Browse Templates → FreeVideo → FreeVideo-All-in-One**, and complete the setup in FreeVideo **Settings**.
 
+### macOS — experimental Apple Silicon preview
+
+This fork contains an experimental **MPS/Metal** backend for Apple Silicon. It is a
+correctness-first port, not a performance-qualified release. The first preview supports
+**one-pass text-to-video only** and intentionally disables CUDA/Triton/SageAttention/
+FlashAttention paths, two-pass refinement, LoRAs and resident worker caching.
+
+Current memory target: **48 GB unified memory minimum, 64 GB or more recommended**.
+The transformer remains in compact FP8 storage in CPU/unified memory and each wide
+linear is expanded temporarily for BF16/FP16 MPS compute.
+
+Install the runtime and pinned model-code dependencies:
+
+```bash
+git clone https://github.com/AbdullahBahmani/FreeVideo.git
+cd FreeVideo
+git checkout experimental/macos-mps
+chmod +x setup_macos.sh freevideo
+./setup_macos.sh
+```
+
+Run the MPS smoke test at any time:
+
+```bash
+.venv-macos/bin/python scripts/check_macos.py
+```
+
+Download the pinned compact model bundle, VAE/audio assets and H3 text encoder:
+
+```bash
+./setup_macos.sh --models
+```
+
+Then create `prompt.txt` and start with a small, one-pass request:
+
+```bash
+./freevideo generate --prompt-file prompt.txt \
+  --cache prepared/edge-ae041e5aec51f851/rowwise/cache \
+  --base models/h3-base \
+  --checkpoint models/stage-dmd-step-250 \
+  --encoder-root vendor/ComfyUI \
+  --model-paths encoder-paths.yaml \
+  --no-two-pass --width 512 --height 288 --frames 73 \
+  --out video.mp4
+```
+
+`setup_macos.sh --models` prints the exact paths for the pinned revision after download.
+The MPS port still needs validation on real Apple hardware, especially the pinned NVFP4
+H3 text encoder. If that dependency rejects MPS, the error is intentionally surfaced
+instead of silently moving the 32B encoder to CPU.
+
 ### Linux
 
 Install:

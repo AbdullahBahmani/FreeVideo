@@ -318,7 +318,16 @@ def _run(args):
         profile = json.loads(args.profile.read_text(encoding='utf-8'))
     else:
         hardware, resident_credit, profile = automatic_profile(args, canvas, stage='before-encoding', evidence=planning)
-    print(json.dumps(dict(event='compute_device', backend='CUDA', name=getattr(hardware, 'gpu_name', None),
+    if hardware.architecture == 'apple-silicon':
+        if two_pass:
+            raise ValueError('The first Apple Silicon preview supports one-pass generation only; add --no-two-pass.')
+        if media:
+            raise ValueError('The first Apple Silicon preview supports text-to-video only; media references and LoRAs are not enabled yet.')
+        if getattr(args, 'allocator_limit_gib', None) is not None:
+            raise ValueError('--allocator-limit-gib is a CUDA-only benchmark option and is not supported on MPS.')
+    print(json.dumps(dict(event='compute_device',
+                          backend='MPS' if hardware.architecture == 'apple-silicon' else 'CUDA',
+                          name=getattr(hardware, 'gpu_name', None),
                           uuid=getattr(hardware, 'gpu_uuid', None), vram_total_bytes=getattr(hardware, 'vram_total', None),
                           vram_free_bytes=getattr(hardware, 'vram_free', None))), flush=True)
     allocator_limit_bytes = benchmark_allocator_limit(profile, getattr(args, 'allocator_limit_gib', None), hardware)

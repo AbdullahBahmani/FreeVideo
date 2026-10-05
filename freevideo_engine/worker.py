@@ -14,6 +14,10 @@ from .decode import decode_to_file
 from .locking import runtime_lock
 from .monitoring import save
 from .processes import worker_signals
+from .device import (device as active_device, kind as accelerator_kind,
+                     memory_allocated, memory_reserved, max_memory_allocated,
+                     max_memory_reserved, reset_peak_memory_stats, empty_cache,
+                     mem_get_info)
 
 
 def main():
@@ -59,6 +63,7 @@ def device_memory_report(budget_bytes, allocator_limit_bytes=None, *, reserve_by
 
 def generate(request, resident=None):
     torch.set_num_threads(8)
+    device = active_device()
     started = time.perf_counter()
     prefetch_compiler_keys()
     engine = None
@@ -98,7 +103,7 @@ def generate(request, resident=None):
                     reclaim(target)
                 if resident is not None:
                     for role in tuple(resident.entries):
-                        if torch.cuda.memory_allocated() <= target:
+                        if memory_allocated() <= target:
                             break
                         if role != 'engine' or stage == 'decode':
                             resident.drop(role, 'Live GPU budget decreased')
@@ -141,7 +146,7 @@ def generate(request, resident=None):
             print(json.dumps(dict(event='decode_resume', sampling_source_attempt=metrics['sampling_source_attempt'])), flush=True)
             if resident is not None:
                 resident.decoder_room(decoder, canvas)
-            latents, audio = latents.to('cuda'), audio.to('cuda')
+            latents, audio = latents.to(device), audio.to(device)
             metrics['latent_reload_seconds'] = time.perf_counter() - tick
             metrics['transformer_released_before_decode'] = resident is None or 'engine' not in resident.entries
         else:
@@ -153,8 +158,8 @@ def generate(request, resident=None):
             metrics.update(config=dict(engine.config), load_seconds=loaded_seconds,
                            resident_engine_cache_hit=reused,
                            load_breakdown=({'resident_lookup_seconds': loaded_seconds} if reused else engine.load_breakdown), phase='sample',
-                           load_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-                           load_peak_reserved_bytes=torch.cuda.max_memory_reserved())
+                           load_peak_allocated_bytes=max_memory_allocated(),
+                           load_peak_reserved_bytes=max_memory_reserved())
             if live_budget is not None:
                 refresh_budget('load')
             if resident is not None:
@@ -164,7 +169,7 @@ def generate(request, resident=None):
             foreign_sample_bytes = 0
             if resident is not None:
                 from .resident_models import gpu_bytes
-                foreign_sample_bytes = max(0, torch.cuda.memory_allocated() - gpu_bytes(engine))
+                foreign_sample_bytes = max(0, memory_allocated() - gpu_bytes(engine))
             from .decode_prefetch import DecoderReadAhead
             decode_read_ahead = DecoderReadAhead(engine.base, ram_budget_bytes=request.get('ram_budget_bytes'))
             decoder_cached = resident is not None and 'video_vae' in resident.entries
@@ -214,7 +219,7 @@ def generate(request, resident=None):
                         save(request['metrics'], metrics)
                         tick = time.perf_counter()
                         latents, audio, first, lifted, reused = load_refine_input(request, torch)
-                        latents, audio = latents.to('cuda'), audio.to('cuda')
+                        latents, audio = latents.to(device), audio.to(device)
                         metrics.update(reused, sampling_passes=[first], latent_upscale=lifted,
                                        first_pass_load_seconds=time.perf_counter() - tick)
                         print(json.dumps(dict(event='first_pass_reused', source_attempt=reused['first_pass_source_attempt'],
@@ -243,18 +248,18 @@ def generate(request, resident=None):
                         need = upscale_workspace(sampling_plan['upscale_target']) if sampling_plan['upscaler_sha256'] else 0
                         if need and resident is not None and not resident.ram_fits(2 * 2**30):
                             resident.make_room('latent_upscaler', need, ram_need=2 * 2**30)
-                        torch.cuda.empty_cache()
+                        empty_cache()
                         def upscale_available():
-                            free, _ = torch.cuda.mem_get_info()
+                            free, _ = mem_get_info()
                             budget = metrics['device_memory'].get('effective_allocator_limit_bytes') or request['gpu_budget_bytes']
-                            return min(free - request.get('gpu_reserve_bytes', 0), budget - torch.cuda.memory_allocated())
+                            return min(free - request.get('gpu_reserve_bytes', 0), budget - memory_allocated())
                         available = upscale_available()
                         # Prefer buffer reuse before discarding useful host weights.
                         # The estimate selects this path, not permission to run.
                         # Actual allocation remains bounded by the worker's CUDA
                         # allocator limit. Keep the completed first-pass latents.
                         memory_saving = available < need
-                        torch.cuda.reset_peak_memory_stats()
+                        reset_peak_memory_stats()
                         lift_canvas = sampling_plan['upscale_target']
                         retry_upscale = False
                         upscale_failures = []
@@ -286,7 +291,7 @@ def generate(request, resident=None):
                                 resident.make_room('latent_upscaler', need, ram_need=2 * 2**30)
                             import gc
                             gc.collect()
-                            torch.cuda.empty_cache()
+                            empty_cache()
                             metrics['latent_upscale'].update(buffer_reuse=True, allocation_retries=1)
                             save(request['metrics'], metrics)
                             lifted_video, lifted = upscale(latents, request.get('upscaler_checkpoint'),
@@ -301,8 +306,8 @@ def generate(request, resident=None):
                             attempted_below_estimate=memory_saving,
                             allocation_retries=len(upscale_failures),
                             allocation_failures=upscale_failures,
-                            torch_peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-                            torch_peak_reserved_bytes=torch.cuda.max_memory_reserved(),
+                            torch_peak_allocated_bytes=max_memory_allocated(),
+                            torch_peak_reserved_bytes=max_memory_reserved(),
                             transformer_reloaded=engine.closed)
                         metrics['latent_upscale'] = lifted
                         if engine.closed:
@@ -382,7 +387,7 @@ def generate(request, resident=None):
             from .resident_models import gpu_bytes
             foreign_decode_bytes = sum(gpu_bytes(entry['model']) for role, entry in resident.entries.items()
                                        if role not in ('video_vae', 'audio_vae'))
-        torch.cuda.reset_peak_memory_stats()
+        reset_peak_memory_stats()
         def decode_phase(name):
             metrics['decode_phase'] = name
             if resident is not None:
@@ -400,7 +405,7 @@ def generate(request, resident=None):
                 from .two_pass_metrics import sampling_workspace_peak
                 resident.observe_peak('engine', resident.engine_key(request),
                     sampling_workspace_peak(sampled) - foreign_sample_bytes)
-            resident.observe_peak('decode', key(dict(options=decoder, canvas=canvas)), torch.cuda.max_memory_allocated() - foreign_decode_bytes)
+            resident.observe_peak('decode', key(dict(options=decoder, canvas=canvas)), max_memory_allocated() - foreign_decode_bytes)
             metrics['resident_models'] = resident.snapshot()
     except BaseException as error:
         original_error = error
@@ -410,8 +415,10 @@ def generate(request, resident=None):
         # A driver query can itself fail. Persist the original exception first.
         save(request['metrics'], metrics)
         from .encoder_memory import failure_resources
-        metrics['failure'].update(failure_resources(torch, query_cuda=metrics['failure']['kind'] != 'cuda_error'))
-        if isinstance(error, torch.cuda.OutOfMemoryError):
+        metrics['failure'].update(failure_resources(
+            torch, query_cuda=accelerator_kind() == 'cuda' and metrics['failure']['kind'] != 'cuda_error'))
+        if (isinstance(error, (torch.OutOfMemoryError, torch.cuda.OutOfMemoryError))
+                or (accelerator_kind() == 'mps' and 'out of memory' in str(error).lower())):
             metrics['failure'].update(kind='gpu_oom', outcome='resource_failure', retryable=True)
             metrics['failure']['device_memory'] = metrics.get('device_memory', {})
         # Write the first failure before any cleanup CUDA call: the device may
@@ -440,10 +447,10 @@ def generate(request, resident=None):
                 metrics.setdefault('cleanup_errors', []).append(repr(error))
         metrics['work_seconds'] = time.perf_counter() - started
         unsafe = classify_failure(original_error or '', metrics)['kind'] == 'cuda_error'
-        if not unsafe and torch.cuda.is_initialized():
+        if not unsafe and (accelerator_kind() != 'cuda' or torch.cuda.is_initialized()):
             try:
-                metrics['final_stage_peak_allocated_bytes'] = torch.cuda.max_memory_allocated()
-                metrics['final_stage_peak_reserved_bytes'] = torch.cuda.max_memory_reserved()
+                metrics['final_stage_peak_allocated_bytes'] = max_memory_allocated()
+                metrics['final_stage_peak_reserved_bytes'] = max_memory_reserved()
             except BaseException as error:
                 cleanup_error = cleanup_error or error
                 metrics.setdefault('cleanup_errors', []).append(repr(error))

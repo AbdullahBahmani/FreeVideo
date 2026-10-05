@@ -197,8 +197,15 @@ def prepare_streamed(base, checkpoint, cache_root):
 
 
 def install_cached_linears(model, linears, *, weight_only=False):
-    from src.models.ops.fp8_linear import Fp8Linear, FP8_DTYPE
     from .weight_only import WeightOnlyLinear
+    if weight_only:
+        # The Apple Silicon path must not import upstream fp8_linear: that
+        # module imports Triton at module load time. Compact cached weights use
+        # the same e4m3 dtype, but their GEMM is handled by WeightOnlyLinear.
+        Fp8Linear = None
+        FP8_DTYPE = torch.float8_e4m3fn
+    else:
+        from src.models.ops.fp8_linear import Fp8Linear, FP8_DTYPE
     for name, spec in linears.items():
         original = model.get_submodule(name)
         if not isinstance(original, torch.nn.Linear):

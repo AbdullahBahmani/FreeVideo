@@ -61,15 +61,29 @@ def allocator_ceiling(budget, total, free, reserved, reserve, local=None):
 
 
 def configure(torch, budget_bytes, explicit_limit=None, *, reserve_bytes=0, system=None, capacity_trial=False):
-    """Bound Windows, a low-memory trial, or an explicit benchmark allocation.
+    """Bound CUDA allocators; report (but do not fake) limits for Apple MPS.
 
-    Reclaimed pool blocks can still be reused by the caching allocator. Its own
-    OOM is recoverable by the controller, unlike silently relying on WDDM to
-    back excessive GPU allocation with system memory. This is not a whole-device
-    limit and cannot prevent every instance of driver paging.
+    MPS uses unified memory and PyTorch does not expose CUDA's per-process
+    allocator fraction API. The macOS preview therefore records the live
+    recommendation and relies on conservative planning plus real MPS OOMs.
     """
     global _trial_allocator_owner
     from .policy import memory_fraction
+    if (not torch.cuda.is_available() and getattr(torch.backends, 'mps', None) is not None
+            and torch.backends.mps.is_available()):
+        from .device import mem_get_info
+        free, total = mem_get_info()
+        if explicit_limit is not None:
+            raise ValueError('Explicit CUDA allocator limits are not supported on MPS')
+        return dict(device_total_bytes=total, budget_bytes=budget_bytes,
+                    planned_fraction=memory_fraction(min(budget_bytes, total), total),
+                    enforced=False, benchmark_allocator_limit_bytes=None,
+                    benchmark_allocator_limit_enforced=False,
+                    capacity_trial_limit_enforced=False,
+                    windows_allocator_limit_enforced=False,
+                    effective_allocator_limit_bytes=None,
+                    live_free_bytes=free,
+                    scope='Apple MPS unified memory; no CUDA-style per-process allocator cap is available.')
     total = torch.cuda.get_device_properties(0).total_memory
     planned = memory_fraction(budget_bytes, total)
     if explicit_limit is not None and (type(explicit_limit) is not int or not 0 < explicit_limit <= total):
