@@ -59,7 +59,7 @@ fi
 
 "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel
 # PyPI macOS arm64 PyTorch wheels include MPS. Never install CUDA/Triton here.
-"$VENV/bin/python" -m pip install torch torchvision torchaudio
+"$VENV/bin/python" -m pip install "torch==2.13.0" "torchvision==0.28.0" "torchaudio==2.11.0"
 "$VENV/bin/python" -m pip install -e '.[runtime]'
 "$VENV/bin/python" -m pip install -r constraints/encoder-runtime.txt
 
