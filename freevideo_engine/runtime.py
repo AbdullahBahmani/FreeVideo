@@ -240,9 +240,14 @@ class Engine:
         precision = manifest.get('precision', 'bf16')
         actual_fp8_gemm = None
         if precision == 'fp8':
-            from src.models.ops.fp8_linear import per_tensor_gemm
             from .fp8 import install_cached_linears
-            expected = 'per_tensor' if per_tensor_gemm() else 'rowwise'
+            if linear_compute == 'portable-bf16':
+                # The prepared rowwise cache is storage-only on MPS. Avoid
+                # importing upstream fp8_linear because it imports Triton.
+                expected = manifest.get('scale_granularity')
+            else:
+                from src.models.ops.fp8_linear import per_tensor_gemm
+                expected = 'per_tensor' if per_tensor_gemm() else 'rowwise'
             if linear_compute == 'native-fp8' and torch.cuda.get_device_capability() < (8, 9):
                 raise ValueError('Native FP8 GEMM requires Ada or newer; choose bf16-weight-only on Ampere')
             if linear_compute == 'native-fp8' and manifest['scale_granularity'] != expected:
