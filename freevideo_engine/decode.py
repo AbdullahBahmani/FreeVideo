@@ -6,6 +6,8 @@ import time
 
 import torch
 
+from .device import device as active_device, synchronize, empty_cache, autocast
+
 from .offload import LayerOffloader, pin_layer_weights
 from .vae_tiles import TileDecoder, compile_blocks
 
@@ -15,6 +17,7 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
                    preload=False, pin_weights=False, artifacts_dir=None, phase_callback=None,
                    stream_output=False, stream_weights=False, resident_blocks=0, model_cache=None,
                    linear_compute_cache=False):
+    device = active_device()
     from diffusers import AutoencoderKLMiniMaxH3
     from diffusers.utils.export_utils import encode_video
     from src.inference.render import PIXEL_MEAN, PIXEL_STD, FPS
@@ -66,12 +69,12 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
         raise ValueError('VAE resident block count is outside this decoder')
     vae.encoder = None
     vae.quant_conv = None
-    vae.post_quant_conv.to('cuda')
+    vae.post_quant_conv.to(device)
     if offload:
         for name, child in vae.decoder.named_children():
             if name != 'transformer_blocks':
-                child.to('cuda')
-        vae.decoder.register_tokens.data = vae.decoder.register_tokens.data.to('cuda')
+                child.to(device)
+        vae.decoder.register_tokens.data = vae.decoder.register_tokens.data.to(device)
         offloaded_blocks = list(vae.decoder.transformer_blocks)[resident_blocks:]
         pinned_bytes = pin_layer_weights(offloaded_blocks) if pin_weights else 0
         if pin_weights:
@@ -88,7 +91,7 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
         offloader = tile_decoder.offloader if tile_decoder is not None else LayerOffloader(offloaded_blocks, prefetch=prefetch, weight_source=weight_source)
     else:
         pinned_bytes = 0
-        vae.decoder.to('cuda')
+        vae.decoder.to(device)
         offloader = None
         tile_decoder = None
         # Release unused encoder views of the checkpoint shards. Otherwise
@@ -111,9 +114,9 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
         del buffer
         preload_seconds = time.perf_counter() - read_started
     compiled_blocks = compile_blocks(vae.decoder)
-    mean = torch.tensor(vae.config.latents_mean, device='cuda').view(1, -1, 1, 1, 1)
-    std = torch.tensor(vae.config.latents_std, device='cuda').view(1, -1, 1, 1, 1)
-    torch.cuda.synchronize()
+    mean = torch.tensor(vae.config.latents_mean, device=device).view(1, -1, 1, 1, 1)
+    std = torch.tensor(vae.config.latents_std, device=device).view(1, -1, 1, 1, 1)
+    synchronize(device)
     load_seconds = time.perf_counter() - started
     decode_started = time.perf_counter()
     phase('video_decode')
@@ -124,7 +127,7 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
     try:
         # Autocast follows the original renderer. The opt-in Linear cache stores
         # its existing FP16 compute values once; all other weights stay FP32.
-        with torch.autocast(device_type='cuda', dtype=torch.float16, cache_enabled=not offload):
+        with autocast(torch.float16, enabled=True):
             if stream_output:
                 from .decode_stream import render_rgb
                 directory = Path(artifacts_dir) if artifacts_dir else Path(out_path).with_suffix('.artifacts')
@@ -148,7 +151,7 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
         if offload:
             del offloaded_blocks
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
         video_decode_seconds = streamed_timings.get('video_decode_seconds', time.perf_counter() - decode_started)
         phase('video_postprocess')
         # Bound postprocessing memory by frame chunks; use the same FP32 operations
@@ -183,18 +186,18 @@ def decode_to_file(latents, audio_latents, out_path, *, base, offload=False, pre
         audio_cache_hit = audio_vae is not None
         if audio_vae is None:
             from .vae_weights import load_audio_vae
-            audio_vae, _ = load_audio_vae(base)
+            audio_vae, _ = load_audio_vae(base, device=device)
         if model_cache is not None:
             model_cache.put('audio_vae', audio_key, audio_vae)
         audio_vae.eval().requires_grad_(False)
-        audio_mean = torch.tensor(audio_vae.config.latents_mean, device='cuda').view(1, -1, 1)
-        audio_std = torch.tensor(audio_vae.config.latents_std, device='cuda').view(1, -1, 1)
+        audio_mean = torch.tensor(audio_vae.config.latents_mean, device=device).view(1, -1, 1)
+        audio_std = torch.tensor(audio_vae.config.latents_std, device=device).view(1, -1, 1)
         audio = audio_vae.decode(audio_latents * audio_std + audio_mean, return_dict=False)[0]
         audio = audio.float().permute(1, 0, 2)[0].cpu()
         rate = audio_vae.config.sampling_rate
         del audio_vae, audio_mean, audio_std
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
         audio_seconds = time.perf_counter() - audio_start
         if artifacts_dir:
             import wave
