@@ -1,4 +1,4 @@
-"""Official decomposed attention or portable cuDNN/Sage window calls."""
+"""Official decomposed attention plus CUDA and portable PyTorch SDPA routes."""
 import types
 import importlib.metadata
 from collections import defaultdict
@@ -14,8 +14,8 @@ from src.models.softmax_attention.decomposed import _plan, window_softmax_decomp
 
 ALIASES = {'original': 'cudnn/fa4', 'dense': 'cudnn/cudnn',
            'sage2': 'sage2/sage2', 'sage2-window': 'cudnn/sage2',
-           'fa2-window': 'cudnn/fa2', 'sdpa': 'torch-flash/torch-flash'}
-BACKENDS = ('cudnn', 'torch-flash', 'sage2', 'fa2', 'fa4')
+           'fa2-window': 'cudnn/fa2', 'sdpa': 'torch-sdpa/torch-sdpa'}
+BACKENDS = ('cudnn', 'torch-flash', 'torch-sdpa', 'sage2', 'fa2', 'fa4')
 
 
 def split_backend(backend):
@@ -64,6 +64,12 @@ class WindowAttention:
             from flash_attn.cute import flash_attn_func
             result = flash_attn_func(q, k, v, softmax_scale=scale, causal=False)
             return result[0] if isinstance(result, tuple) else result
+        if leg == 'torch-sdpa':
+            # Do not force a CUDA SDPBackend here. PyTorch selects the native
+            # implementation for the active device (MPS on Apple Silicon).
+            result = F.scaled_dot_product_attention(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), scale=scale)
+            return result.transpose(1, 2)
         backend = SDPBackend.CUDNN_ATTENTION if leg == 'cudnn' else SDPBackend.FLASH_ATTENTION
         with sdpa_kernel(backend):
             result = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2),
